@@ -1,4 +1,3 @@
-#main() 함수
 import os, sys
 import numpy as np
 import imageio
@@ -24,40 +23,59 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 DEBUG = False
 
-
+# batchify -> 더 작은 batch size에 적용할 수 있는 fn 설정
+# netchunk = 1024*64 = rays/batch * points/ray = 65536 points/batch
 def batchify(fn, chunk):
     """Constructs a version of 'fn' that applies to smaller batches.
     """
     if chunk is None:
         return fn
     def ret(inputs):
+        # print('inputs : ', inputs.shape) # [65536, 90]
+        # print('chunk : ', chunk) # 65536
         return torch.cat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+        # range(0, 65536, 65536) -> batch = 1, range(0, 131072, 65536) -> batch = 2
     return ret
-
 
 def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'.
     """
+    # 하나의 ray에 대한 inputs(x, y, z), viewdirs(X, Y, Z)
+    # print('inputs : ', inputs.shape) # [1024, 64, 3] -> 1 batch = 1024 rays, N_c = 64 -> 한 ray에서 sampling한 point 개수, 3 -> [x, y, z], position
+    # print('viewdirs : ', viewdirs.shape) # [1024, 3]
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
+    # print('inputs_flat : ', inputs_flat.shape) # [1024x64, 3], 3 -> [x, y, z]
     embedded = embed_fn(inputs_flat)
+    # print('embedded : ', embedded.shape) # [1024x64, 63], 63 = 60 + 3 -> positional encoding
 
-    if viewdirs is not None:
+    if viewdirs is not None: # viewdirs = True
         input_dirs = viewdirs[:,None].expand(inputs.shape)
+        # print('input_dirs : ', input_dirs.shape) # [1024, 64, 3], 1 batch = 1024 rays, N_c = 64 -> 한 ray에서 sampling한 point 개수, 3 -> [X, Y, Z], direction
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
+        # print('input_dir_flat : ', input_dirs_flat.shape) # [1024x64, 3], 3 -> [X, Y, Z]
         embedded_dirs = embeddirs_fn(input_dirs_flat)
+        # print('embedded_dirs : ', embedded_dirs.shape) # [1024x64, 27], 27 = 24 + 3 -> positional encoding
         embedded = torch.cat([embedded, embedded_dirs], -1)
-
-    outputs_flat = batchify(fn, netchunk)(embedded)
+        # print('concat : ', embedded.shape) # [1024x64, 90] = [65536, 90]
+    
+    # fn -> NeRF
+    outputs_flat = batchify(fn, netchunk)(embedded) # netchunk = 1024*64 -> 1 batch 당 points
+    # print('outputs_flat : ', outputs_flat.shape) # [65536, 4] -> 각 point에서의 rgb + density
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
-    return outputs
+    # print('outputs : ', outputs.shape) # [1024, 64, 4]
+    return outputs # [batch 당 ray의 수, ray 당 point의 수, rgb + density]
 
-
+# ray batch화
+# all_ret = batchify_rays(rays, chunk, **kwargs)
+# rays = [1024, 11]
 def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     """
     all_ret = {}
-    for i in range(0, rays_flat.shape[0], chunk):
-        ret = render_rays(rays_flat[i:i+chunk], **kwargs)
+    # print('rays_flat : ', rays_flat.shape) # [1024, 11]
+    for i in range(0, rays_flat.shape[0], chunk): # [0, 1024, 1024*32] -> 반복 x
+        # print(i) # 0
+        ret = render_rays(rays_flat[i:i+chunk], **kwargs) # 
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -65,7 +83,6 @@ def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
 
     all_ret = {k : torch.cat(all_ret[k], 0) for k in all_ret}
     return all_ret
-
 
 def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
                   near=0., far=1.,
@@ -89,28 +106,30 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
        camera while using other c2w argument for viewing directions.
     Returns:
       rgb_map: [batch_size, 3]. Predicted RGB values for rays.
-      disp_map: [batch_size]. Disparity map. Inverse of depth.
+      disp_map: [batch_size]. Disparity map. Inverse of depth. -> 거리가 가까울수록, 해당하는 pixel 값이 커지기 때문
       acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
       extras: dict with everything returned by render_rays().
     """
-    if c2w is not None:
+    if c2w is not None: # c2w가 존재한다면,
         # special case to render full image
         rays_o, rays_d = get_rays(H, W, K, c2w)
     else:
         # use provided ray batch
         rays_o, rays_d = rays
 
-    if use_viewdirs:
+    if use_viewdirs: # use_viewdirs = True
         # provide ray directions as input
         viewdirs = rays_d
         if c2w_staticcam is not None:
             # special case to visualize effect of viewdirs
             rays_o, rays_d = get_rays(H, W, K, c2w_staticcam)
         viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
+        # print('viewdirs : ', viewdirs.shape) # [1024, 3]
         viewdirs = torch.reshape(viewdirs, [-1,3]).float()
+        # print('viewdirs : ', viewdirs.shape) # [1024, 3], 3 -> [X, Y, Z]
 
     sh = rays_d.shape # [..., 3]
-    if ndc:
+    if ndc: # ndc = True
         # for forward facing scenes
         rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
 
@@ -118,11 +137,17 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     rays_o = torch.reshape(rays_o, [-1,3]).float()
     rays_d = torch.reshape(rays_d, [-1,3]).float()
 
+    # print('rays_o : ', rays_o.shape) # [1024, 3]
+    # print('rays_d : ', rays_d.shape) # [1024, 3]
+
     near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])
+    # print(near.shape) # [1024, 1]
+    # print(far.shape) # [1024, 1]
     rays = torch.cat([rays_o, rays_d, near, far], -1)
     if use_viewdirs:
-        rays = torch.cat([rays, viewdirs], -1)
-
+        rays = torch.cat([rays, viewdirs], -1) # viewdirs -> normalization of rays_d
+        # print('rays : ', rays.shape) # rays = rays_o + rays_d + near + far + viewdirs
+        # [1024, 11], 11 = 3 + 3 + 1 + 1 + 3
     # Render and reshape
     all_ret = batchify_rays(rays, chunk, **kwargs)
     for k in all_ret:
@@ -175,30 +200,34 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
     return rgbs, disps
 
-
+# model 설정
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
-    embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
-
+    embed_fn, input_ch = get_embedder(args.multires, args.i_embed) # 10, 0 -> multires = L
+    # print('embed_fn, input_ch', embed_fn, input_ch) # input_ch = 63 -> 60(2x10x3) + 3(position)
     input_ch_views = 0
     embeddirs_fn = None
-    if args.use_viewdirs:
-        embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
-    output_ch = 5 if args.N_importance > 0 else 4
+    if args.use_viewdirs: # use_viewdirs = True
+        embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed) # 4, 0
+        # print('embeddirs_fn, input_ch_views', embeddirs_fn, input_ch_views) # input_ch_views = 27 -> 24(2x4x3) + 3(direction)
+    output_ch = 5 if args.N_importance > 0 else 4 # Fine Sampling -> output_ch = 5, Coarse Sampling -> output_ch = 4
     skips = [4]
+    # Coarse Sampling -> output_ch = 4
     model = NeRF(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
     grad_vars = list(model.parameters())
 
     model_fine = None
-    if args.N_importance > 0:
+    if args.N_importance > 0: # Fine Sampling -> output_ch = 5
         model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
                           input_ch=input_ch, output_ch=output_ch, skips=skips,
                           input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
         grad_vars += list(model_fine.parameters())
 
+    # inputs(position), viewdirs(direction), network_fn -> 매개변수, run_network -> return
+    # network_query_fn -> [1024, 64, 4], 4 -> rgb + density
     network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
                                                                 embed_fn=embed_fn,
                                                                 embeddirs_fn=embeddirs_fn,
@@ -253,13 +282,13 @@ def create_nerf(args):
         render_kwargs_train['ndc'] = False
         render_kwargs_train['lindisp'] = args.lindisp
 
-    render_kwargs_test = {k : render_kwargs_train[k] for k in render_kwargs_train}
+    render_kwargs_test = {k : render_kwargs_train[k] for k in render_kwargs_train} # render_kwargs_test = render_kwargs_train
     render_kwargs_test['perturb'] = False
     render_kwargs_test['raw_noise_std'] = 0.
 
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
 
-
+# 3D rgb + density -> 2D image
 def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
     """Transforms model's predictions to semantically meaningful values.
     Args:
@@ -273,39 +302,67 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
     """
+    # lambda 매개변수: 표현식
+    # 3D rgb -> 2D rgb로의 weight을 구하는 수식, raw -> 3D color
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
-    dists = z_vals[...,1:] - z_vals[...,:-1]
+    dists = z_vals[...,1:] - z_vals[...,:-1] # 각 sample들 간의 거리
+    # print('dists : ', dists.shape) # [1024, 63]
     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
-
+    # print('dists : ', dists) # 마지막 1e10은 무한대를 의미
+    # print(dists.shape) # [1024, 64]
+    # print('rays_d : ', rays_d.shape) # [1024, 3]
+    # print(rays_d[...,None,:].shape) # [1024, 1, 3] -> [X, Y, Z] direction에 대한 normalization
+    # print(torch.norm(rays_d[...,None,:], dim=-1).shape) # [1024, 1]
     dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
-
-    rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
+    # print('dists : ', dists.shape) # [1024, 64]
+    # print('raw : ', raw.shape) # [1024, 64, 4] -> rgb + density
+    rgb = torch.sigmoid(raw[...,:3]) # [N_rays, N_samples, 3] -> density를 제외한 rgb만
+    # print('rgb : ', rgb.shape) # [1024, 64, 3]
     noise = 0.
+    # print('raw_noise_std : ', raw_noise_std) # 1.0
     if raw_noise_std > 0.:
-        noise = torch.randn(raw[...,3].shape) * raw_noise_std
-
+        noise = torch.randn(raw[...,3].shape) * raw_noise_std 
+        # raw[...,3] -> density
         # Overwrite randomly sampled data if pytest
         if pytest:
             np.random.seed(0)
             noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
             noise = torch.Tensor(noise)
 
-    alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
+    alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples] -> [1024, 64]
+    # alpha = 1-exp(-rgb*dists)
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
+    # torch.cumprod() : 차원 dim에 있는 input 요소의 누적 곱을 반환한다. ex) a = [a, b, c, d] -> torch.cumprod(a, dim=0) = [a, axb, axbxc, axbxcxd]
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
+    # weights의 맨 앞에 붙는 alpha -> T
+    # a = torch.cat([torch.ones((alpha.shape[0], 1)), 1-alpha+1e-10], -1) # 마지막 값은 빼줄 것이기 때문에 쓰레기 값을 넣는다.
+    # print('a : ', a.shape) # [1024, 65]
+    # print('a : ', a)
+    # b = torch.cumprod(a, -1) 
+    # print('b: ', b) 
+    # print('b : ', b.shape) # [1024, 65]
+    # c = b[:, :-1] # [1024, 64] -> 마지막 값을 포함하지 않는다.
+    # print('c : ', c) 
+    # print('c : ', c.shape) # [1024, 64]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
-
-    depth_map = torch.sum(weights * z_vals, -1)
+    # [1024, 64, 1] * [1024, 64, 3] = [1024, 64, 3] -> [1024, 3]
+    # print('rgb_map : ', rgb_map.shape) # [1024, 3]
+    # print('rgb_map : ', rgb_map) # 0~1
+    depth_map = torch.sum(weights * z_vals, -1) # [1024]
+    # print('depth_map : ', depth_map.shape) # [1024]
+    # print('depth_map : ', depth_map) # 0~1
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
-    acc_map = torch.sum(weights, -1)
+    # depth_map의 inversion
+    acc_map = torch.sum(weights, -1) # weight map
 
     if white_bkgd:
         rgb_map = rgb_map + (1.-acc_map[...,None])
 
     return rgb_map, disp_map, acc_map, weights, depth_map
 
-
+# Classic Volume Rendering
+# ret = render_rays(rays_flat[i:i+chunk], **kwargs) -> rays_flat = [1024, 11] -> rays_o + rays_d + near + far + viewdirs(the normalization of rays_d)
 def render_rays(ray_batch,
                 network_fn,
                 network_query_fn,
@@ -349,45 +406,60 @@ def render_rays(ray_batch,
       z_std: [num_rays]. Standard deviation of distances along ray for each
         sample.
     """
-    N_rays = ray_batch.shape[0]
+    # print('ray_batch : ', ray_batch.shape) # [1024, 11], 11 = rays_o 3 + rays_d 3 + near 1 + far 1 + viewdirs 3
+    N_rays = ray_batch.shape[0] # 1 batch = 1024 rays
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
-    viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
-    bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
-    near, far = bounds[...,0], bounds[...,1] # [-1,1]
+    viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None # viewdirs 이용 = True -> 11 / viewdirs 이용 = False -> 8
+    bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2]) # near, far
+    near, far = bounds[...,0], bounds[...,1]
 
-    t_vals = torch.linspace(0., 1., steps=N_samples)
-    if not lindisp:
-        z_vals = near * (1.-t_vals) + far * (t_vals)
+    # print('near : ', near) # [1024, 1]
+    # print('far : ', far) # 1
+    # print('N_samples : ', N_samples) # 64
+    t_vals = torch.linspace(0., 1., steps=N_samples) # min_depth와 max_depth 사이를 64개의 point로 sampling 한다.
+    # print('t_vals : ', t_vals.shape) # 64
+
+    if not lindisp: # lindisp -> depth의 inverse에 비례하여 sampling 한다. 가까울 수록, 더 많이 sampling 한다.
+        z_vals = near * (1.-t_vals) + far * (t_vals) # z_vals는 0과 1 사이에 있게 한다.
+        # print(z_vals) # [0, 1]
+        # print(z_vals.shape) # [1024, 64]
     else:
         z_vals = 1./(1./near * (1.-t_vals) + 1./far * (t_vals))
 
     z_vals = z_vals.expand([N_rays, N_samples])
+    # print('z_vals : ', z_vals.shape) # [1024, 64]
 
+    # Stratified sampling
     if perturb > 0.:
         # get intervals between samples
-        mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
-        upper = torch.cat([mids, z_vals[...,-1:]], -1)
-        lower = torch.cat([z_vals[...,:1], mids], -1)
+        mids = .5 * (z_vals[...,1:] + z_vals[...,:-1]) # 중간 값
+        # print('mids : ', mids) # 0.5 * (두 번째 값 + 세 번째 값), 0.5 * (세 번째 값 + 네 번째 값), ...
+        # print(mids.shape) # [1024, 64]
+        upper = torch.cat([mids, z_vals[...,-1:]], -1) # mids + 마지막 값
+        # print('upper : ', upper.shape) # [1024, 64]
+        lower = torch.cat([z_vals[...,:1], mids], -1) # 처음 값 + mids
+        # print('lower : ', lower.shape) # [1024, 64]
         # stratified samples in those intervals
-        t_rand = torch.rand(z_vals.shape)
-
+        t_rand = torch.rand(z_vals.shape) # 0과 1 사이의 size [1024, 64]의 random한 행렬
+        # print('t_rand : ', t_rand)
         # Pytest, overwrite u with numpy's fixed random numbers
         if pytest:
             np.random.seed(0)
             t_rand = np.random.rand(*list(z_vals.shape))
             t_rand = torch.Tensor(t_rand)
 
-        z_vals = lower + (upper - lower) * t_rand
+        z_vals = lower + (upper - lower) * t_rand # random하게 뽑는다.
 
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
-
-
+    # r(t) = o + td, t = z_vals
+    # pts = [1024, 64, 3]
 #     raw = run_network(pts)
     raw = network_query_fn(pts, viewdirs, network_fn)
+    # print('raw : ', raw.shape) # [1024, 64, 4]
+    # network_query_fn -> [1024, 64, 4], 4 -> 3D rgb + 3D density
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
-    if N_importance > 0:
-
+    if N_importance > 0: # Fine sampling = True
         rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
 
         z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
@@ -418,7 +490,7 @@ def render_rays(ray_batch,
 
     return ret
 
-#Hyper parameter
+# Hyper parameter
 def config_parser():
 
     import configargparse
@@ -441,13 +513,13 @@ def config_parser():
                         help='layers in fine network')
     parser.add_argument("--netwidth_fine", type=int, default=256, 
                         help='channels per layer in fine network')
-    parser.add_argument("--N_rand", type=int, default=32*32*4, 
+    parser.add_argument("--N_rand", type=int, default=32*32*4, # 1 batch = 4096 rays
                         help='batch size (number of random rays per gradient step)')
     parser.add_argument("--lrate", type=float, default=5e-4, 
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250, 
                         help='exponential learning rate decay (in 1000 steps)')
-    parser.add_argument("--chunk", type=int, default=1024*32, 
+    parser.add_argument("--chunk", type=int, default=1024*32,
                         help='number of rays processed in parallel, decrease if running out of memory')
     parser.add_argument("--netchunk", type=int, default=1024*64, 
                         help='number of pts sent through network in parallel, decrease if running out of memory')
@@ -460,9 +532,9 @@ def config_parser():
 
     # rendering options
     parser.add_argument("--N_samples", type=int, default=64, 
-                        help='number of coarse samples per ray')
+                        help='number of coarse samples per ray') # Coarse Sampling
     parser.add_argument("--N_importance", type=int, default=0,
-                        help='number of additional fine samples per ray')
+                        help='number of additional fine samples per ray') # Fine Sampling
     parser.add_argument("--perturb", type=float, default=1.,
                         help='set to 0. for no jitter, 1. for jitter')
     parser.add_argument("--use_viewdirs", action='store_true', 
@@ -477,9 +549,9 @@ def config_parser():
                         help='std dev of noise added to regularize sigma_a output, 1e0 recommended')
 
     parser.add_argument("--render_only", action='store_true', 
-                        help='do not optimize, reload weights and render out render_poses path')
+                        help='do not optimize, reload weights and render out render_poses path') # Test
     parser.add_argument("--render_test", action='store_true', 
-                        help='render the test set instead of render_poses path')
+                        help='render the test set instead of render_poses path') # Test
     parser.add_argument("--render_factor", type=int, default=0, 
                         help='downsampling factor to speed up rendering, set 4 or 8 for fast preview')
 
@@ -514,7 +586,7 @@ def config_parser():
                         help='sampling linearly in disparity rather than depth')
     parser.add_argument("--spherify", action='store_true', 
                         help='set for spherical 360 scenes')
-    parser.add_argument("--llffhold", type=int, default=8, 
+    parser.add_argument("--llffhold", type=int, default=8,
                         help='will take every 1/N images as LLFF test set, paper uses 8')
 
     # logging/saving options
@@ -538,37 +610,43 @@ def train():
     args = parser.parse_args()
 
     # Load data
-    K = None
-    #LLFF data 형식의 data loader
+    K = None # K 초기화
+
+    # LLFF Dataloader
     if args.dataset_type == 'llff':
         images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
-                                                                  spherify=args.spherify)
+                                                                  spherify=args.spherify) # Dataloader
+        # print('images : ', images.shape) # [20, 378, 504, 3], 3 -> rgb
         hwf = poses[0,:3,-1]
-        poses = poses[:,:3,:4]
+        poses = poses[:,:3,:4] # poses -> [3, 4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
-        if not isinstance(i_test, list):
-            i_test = [i_test]
+        # images -> [20, 378, 504, 3] = [image 개수, height, width, rgb], render_poses -> [120, 3, 5], hwf -> [378, 504, 407.5658]
+        if not isinstance(i_test, list): # i_test가 list 형식이 아니라면, 
+            i_test = [i_test] # i_test를 list로 만들어라.
 
-        if args.llffhold > 0:
+        # for validation
+        if args.llffhold > 0: # llffhold = 8
             print('Auto LLFF holdout,', args.llffhold)
-            i_test = np.arange(images.shape[0])[::args.llffhold]
-
-        i_val = i_test
+            i_test = np.arange(images.shape[0])[::args.llffhold] # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+            # np.arange(시작점(생략 시 0), 끝점(미포함), step size(생략 시 1))
+            # [::args.llffhold] -> 0 부터 끝까지 args.llffhold 간격으로, i_test = [0, 8, 16]
+        i_val = i_test # validation 수행
+        # print(i_test)
         i_train = np.array([i for i in np.arange(int(images.shape[0])) if
-                        (i not in i_test and i not in i_val)])
-
+                        (i not in i_test and i not in i_val)]) # validation에 이용되는 이미지를 제외한 나머지 이미지는 모두 train image로 이용된다.
+        # print(i_train) # [1 2 3 4 5 6 7 9 10 11 12 13 14 15 17 18 19]
         print('DEFINING BOUNDS')
-        if args.no_ndc: #ndc 처리를 하지 않았다면,
+        if args.no_ndc:
             near = np.ndarray.min(bds) * .9
             far = np.ndarray.max(bds) * 1.
             
-        else:
+        else: # NDC
             near = 0.
             far = 1.
         print('NEAR FAR', near, far)
     
-    #blender data 형식의 data loader
+    # blender data 형식의 data loader
     elif args.dataset_type == 'blender':
         images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
         print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
@@ -617,12 +695,12 @@ def train():
 
     if K is None:
         K = np.array([
-            [focal, 0, 0.5*W],
-            [0, focal, 0.5*H],
+            [focal, 0, 0.5*W], # 0.5*W -> c_x 주점
+            [0, focal, 0.5*H], # 0.5*H -> c_y 주점
             [0, 0, 1]
         ])
 
-    if args.render_test:
+    if args.render_test: # False
         render_poses = np.array(poses[i_test])
 
     # Create log dir and copy the config file
@@ -643,10 +721,13 @@ def train():
     render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
     global_step = start
 
+    # near = 0, far = 1
     bds_dict = {
         'near' : near,
         'far' : far,
     }
+    
+    # boundary depth에 대한 속성 update
     render_kwargs_train.update(bds_dict)
     render_kwargs_test.update(bds_dict)
 
@@ -654,12 +735,12 @@ def train():
     render_poses = torch.Tensor(render_poses).to(device)
 
     # Short circuit if only rendering out from trained model
-    if args.render_only:
+    if args.render_only: # Test
         print('RENDER ONLY')
         with torch.no_grad():
             if args.render_test:
                 # render_test switches to test poses
-                images = images[i_test]
+                images = images[i_test] # 12
             else:
                 # Default is smoother render_poses path
                 images = None
@@ -675,23 +756,29 @@ def train():
             return
 
     # Prepare raybatch tensor if batching random rays
-    N_rand = args.N_rand
+    N_rand = args.N_rand # 1024
     use_batching = not args.no_batching
-    if use_batching:
+    # For Batch 학습
+    if use_batching: # use_batching = True
         # For random ray batching
         print('get rays')
         rays = np.stack([get_rays_np(H, W, K, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
-        print('done, concats')
-        rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
-        rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
+        # print('rays : ', rays.shape) # [20, 2, 378, 504, 3] -> rays_o[378, 504, 3] + rays_d[378, 504, 3], 3 -> [x, y, z] position + [X, Y, Z] direction
+        # print('done, concats')
+        # print('images : ', images.shape) # [20, 378, 504, 3]
+        # print('images_rgb : ', images[:,None].shape) # [20, 1, 378, 504, 3]
+        rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3] -> [20, 3, 378, 504, 3], 3 -> [x, y, z] position + [X, Y, Z] direction + [r, g, b] rgb
+        rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3] -> [20, 378, 504, 3, 3]
         rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
-        rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
+        # print(rays_rgb.shape) # [17, 378, 504, 3, 3] -> validation image [0, 8, 16]을 제외한 train image
+        rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # [(N-1)*H*W, ro+rd+rgb, 3] = [3238704, 3, 3]
+        # print('rays_rgb : ', rays_rgb.shape)
         rays_rgb = rays_rgb.astype(np.float32)
         print('shuffle rays')
         np.random.shuffle(rays_rgb)
 
         print('done')
-        i_batch = 0
+        i_batch = 0 # i_batch 초기화
 
     # Move training data to GPU
     if use_batching:
@@ -710,17 +797,24 @@ def train():
     # Summary writers
     # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
     
+    # train
     start = start + 1
-    for i in trange(start, N_iters):
+    for i in trange(start, N_iters): # tqdm(range()) -> process bar
         time0 = time.time()
 
         # Sample random ray batch
-        if use_batching:
+        if use_batching: # use_batching = True
             # Random over all images
+            # print('rays_rgb : ', rays_rgb.shape) # [3238704, 3, 3] -> rays_o(x, y, z) + rays_d(X, Y, Z) + rgb
+            # 하나의 image의 모든 ray, point에 대해서 batch화 수행
+            # i_batch = 0, i_batch+N_rand = 0+1024
             batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
+            # print('batch : ', batch.shape) # [1024, 3, 3] -> rays_o(x, y, z) + rays_d(X, Y, Z) + rgb
             batch = torch.transpose(batch, 0, 1)
-            batch_rays, target_s = batch[:2], batch[2]
-
+            # print('batch2 : ', batch.shape) # [3, 1024, 3]
+            batch_rays, target_s = batch[:2], batch[2] # [3, 1024] -> 1024 = dimension
+            # batch_rays -> rays_o(x, y, z) + rays_d(X, Y, Z)
+            # target_s -> rgb
             i_batch += N_rand
             if i_batch >= rays_rgb.shape[0]:
                 print("Shuffle data after an epoch!")
@@ -734,7 +828,7 @@ def train():
             target = images[img_i]
             target = torch.Tensor(target).to(device)
             pose = poses[img_i, :3,:4]
-
+        
             if N_rand is not None:
                 rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
 
@@ -760,12 +854,13 @@ def train():
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
+        # Classic Volume Rendering : 3D points -> 2D images
         rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
 
         optimizer.zero_grad()
-        img_loss = img2mse(rgb, target_s)
+        img_loss = img2mse(rgb, target_s) # rgb -> classic volume rendering의 결과, target_s -> train image의 실제 rgb
         trans = extras['raw'][...,-1]
         loss = img_loss
         psnr = mse2psnr(img_loss)
@@ -802,6 +897,7 @@ def train():
             }, path)
             print('Saved checkpoints at', path)
 
+        # video 생성 -> +Test mode
         if i%args.i_video==0 and i > 0:
             # Turn on testing mode
             with torch.no_grad():

@@ -2,6 +2,7 @@ import numpy as np
 import os
 import cv2
 
+# depth -> 16bit로 받아오기 -> 각 이미지의 depth 중
 #Rt.txt에서 5개씩의 image의 간격으로 pose matrix를 만들기 -> [3, 4]
 rt = np.loadtxt('./data/nerf_llff_data/ICL_NUIM2/Rt.txt')
 
@@ -49,16 +50,27 @@ depth_list = []
 for depth in os.listdir('./data/nerf_llff_data/ICL_NUIM2/depth'):
     depth_list.append(depth)
 
+# print(depth_list)
+
 depth_list = sorted(depth_list) #오름차순으로 정렬
+
+# print(depth_list)
 
 #depth scaling -> 먼저 255로 나누기
 depth_array_list = []
 for depth in depth_list:
-    depth_image = cv2.imread('./data/nerf_llff_data/ICL_NUIM2/depth/' + depth, -1)
-    min_max = np.array([depth_image.min()/255, depth_image.max()/255])
-    depth_array_list.append(min_max)
+    depth_image = cv2.imread('./data/nerf_llff_data/ICL_NUIM2/depth/' + depth, -1) # 16bit로 가져오기
+    depth_image = depth_image/5000 # meter 단위
+
+    close_depth, inf_depth = np.percentile(depth_image, .1), np.percentile(depth_image, 99.9)
+
+    # min과 max를 뽑는 것이 아니라, depth list 중 1 퍼센트에 해당하는 depth와 99 퍼센트에 해당하는 depth를 가지고 오는 것이다.
+    # print(close_depth, inf_depth)
+
+    depth_array_list.append([close_depth, inf_depth])
 
 depth_array = np.array(depth_array_list)
+print(depth_array)
 
 npy_file = np.concatenate([poses, depth_array], axis = 1)
 

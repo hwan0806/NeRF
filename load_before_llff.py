@@ -274,8 +274,7 @@ def spherify_poses(poses, bds):
     
     return poses_reset, new_poses, bds
 
-basedir = './data/nerf_llff_data/JH_ICL_3'
-
+basedir = './data/nerf_llff_data/JH_ICL_2'
 # Dataloader
 def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False):
 
@@ -285,15 +284,9 @@ def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=Fal
     # print(imgs.shape) #[378, 504, 3, 20]
 
     # poses_bounds.npy -> [r, -u, t] => [-u, r, -t]
+    
     # Correct rotation matrix ordering and move variable dim to axis 0
-    ########################################################################################
-    ########################################################################################
-    ########################################################################################
-    # [r, -u, t] -> [r, u, -t]
-    poses = np.concatenate([poses[:, 0:1, :], -poses[:, 1:2, :], -poses[:, 2:3, :], poses[:, 3:, :]], 1) # ICL_NUIM camera의 coordinate => [r, u, -t] (World 좌표계와 같은 좌표축 변환)
-    ########################################################################################
-    ########################################################################################
-    ########################################################################################
+    poses = np.concatenate([poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]], 1) # [-u, r, -t] => [r, u, -t] (World 좌표계와 같은 좌표축 변환)
     poses = np.moveaxis(poses, -1, 0).astype(np.float32) # poses -> camera to world coordinates
     # print(poses.shape) # [3, 5, 20] -> [20, 3, 5]
     imgs = np.moveaxis(imgs, -1, 0).astype(np.float32)
@@ -383,8 +376,8 @@ def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=Fal
     poses = poses.astype(np.float32) # poses -> camera to world(여기서 world 좌표계는 average pose로 recenter 됨)
 
     return images, poses, bds, render_poses, i_test # poses -> recentered poses
+
 images, poses, bds, render_poses, i_test = load_llff_data(basedir, factor=1, recenter=True, bd_factor=.75, spherify=False, path_zflat=False)
-# images, poses, bds, render_poses, i_test = load_llff_data('./data/nerf_llff_data/fern', factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False)
 
 last = np.array([0, 0, 0, 1]).reshape(1, 4)
 T_Ba = poses[0,:,:][:,:4] 
@@ -394,18 +387,7 @@ T_Bb = poses[1,:,:][:,:4]
 T_Bb = np.concatenate([T_Bb, last], axis=0)
 T_ab = np.linalg.inv(T_Ba) @ T_Bb
 print(T_ab)
-# [[ 9.99163713e-01 -5.60057153e-04 -4.08579415e-02 -2.04676279e-02]
-#  [ 3.77622290e-04  9.99987500e-01 -4.47403830e-03  6.20073642e-03]
-#  [ 4.08600510e-02  4.45475803e-03  9.99153827e-01 -5.96057956e-02]
-#  [ 0.00000000e+00  0.00000000e+00  0.00000000e+00  1.00000000e+00]]
-
-
-
-
-# print(poses[0,:,:])
-# [[ 9.8400223e-01 -1.0309381e-02  1.7786323e-01  1.2768400e-01
-#    4.8000000e+02]
-#  [-1.6276822e-04  9.9827409e-01  5.8762554e-02 -4.0793482e-02
-#    6.4000000e+02]
-#  [-1.7816168e-01 -5.7851333e-02  9.8230010e-01  2.4014921e-01
-#    5.2500000e+02]]
+# [[ 0.9992517  -0.00420171 -0.03845145 -0.14373397]
+#  [ 0.00440825  0.99997634  0.00528813  0.0092541 ]
+#  [ 0.03842831 -0.00545367  0.99924652 -0.49785128]
+#  [ 0.          0.          0.          1.        ]]

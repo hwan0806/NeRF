@@ -117,7 +117,7 @@ def save_poses(basedir, poses, pts3d, perm):
         zs = zs[vis==1] #visibility가 1인 경우의 z_value만 가져온다.
         print('zs2 : ', zs.shape) #각 이미지에 해당하는 point들의 depth, [481, ]
         close_depth, inf_depth = np.percentile(zs, .1), np.percentile(zs, 99.9) #백분위 0.1 %, 백분위 99.9 %
-        # print( i, close_depth, inf_depth )
+        print( i, close_depth, inf_depth )
         
         save_arr.append(np.concatenate([poses[..., i].ravel(), np.array([close_depth, inf_depth])], 0))
     save_arr = np.array(save_arr)
